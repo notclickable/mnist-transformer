@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torchvision
@@ -31,12 +30,23 @@ test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch
 
 # Define the neural network model
 class ImageClassifier(nn.Module):
-    def __init__(self, input_dim, embedding_dim, output_dim):
+    def __init__(self, input_dim, embedding_dim, output_dim, nhead=8):
         super(ImageClassifier, self).__init__()
         # Embedding layer (using nn.Linear)
         self.embedding = nn.Linear(input_dim, embedding_dim)
-        # Activation function for the embedding layer
-        self.relu = nn.ReLU()
+        
+        # Add Transformer block
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=embedding_dim,
+            nhead=nhead,
+            dim_feedforward=embedding_dim * 4,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=2
+        )
+        
         # Output layer
         self.output = nn.Linear(embedding_dim, output_dim)
 
@@ -44,9 +54,15 @@ class ImageClassifier(nn.Module):
         # Flatten the input
         x = x.view(-1, input_dim)
         # Embed the input
-        embedded = self.relu(self.embedding(x))
+        x = self.embedding(x)
+        # Reshape for transformer: (batch_size, sequence_length=1, embedding_dim)
+        x = x.unsqueeze(1)
+        # Pass through transformer
+        x = self.transformer(x)
+        # Squeeze back: (batch_size, embedding_dim)
+        x = x.squeeze(1)
         # Output layer
-        output = self.output(embedded)
+        output = self.output(x)
         return output
 
 # Initialize the model, loss function, and optimizer
