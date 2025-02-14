@@ -3,31 +3,32 @@ import torch.nn as nn
 import torchvision
 import torchvision.transforms as transforms
 
+# Architecture
+#    Image (28x28)
+#       ↓
+#    Split into patches (16 patches of 7x7)
+#       ↓
+#    Embed patches (patch_dim → embedding_dim)
+#       ↓
+#    Add CLS token
+#       ↓
+#    Add position embeddings
+#       ↓
+#    Transformer layers
+#       ↓
+#    Take CLS token output
+#       ↓
+#    Classification head
+
+
+
+from datasets import train_loader, test_loader
+from params import * 
+from device import get_device
+
 # Set the seed for reproducibility
 torch.manual_seed(0)
-
-# Define the device (GPU or CPU)
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-device = torch.device("mps") if torch.backends.mps.is_available() else device
-
-# Hyperparameters
-input_dim = 784  # 28x28 images
-embedding_dim = 64
-output_dim = 10
-batch_size = 100
-num_epochs = 10
-learning_rate = 0.001
-patch_size = 7     # 28 should be divisible by this
-
-# Load the MNIST dataset
-transform = transforms.Compose([transforms.ToTensor()])
-train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-
-# Data loaders
-train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
-test_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=batch_size, shuffle=False)
-
+device = get_device()
 
 # Define the neural network model
 class ImageClassifier(nn.Module):
@@ -69,23 +70,18 @@ class ImageClassifier(nn.Module):
         # Split image into patches: (batch_size, num_patches, patch_dim)
         x = x.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
         x = x.contiguous().view(batch_size, -1, self.patch_dim)
-        print(x.shape)
+        # print(x.shape)
         # Embed patches
         x = self.patch_embedding(x)
-        
         # Add CLS token
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
-        
         # Add position embeddings
         x = x + self.pos_embedding
-        
         # Apply transformer
         x = self.transformer(x)
-        
         # Use CLS token for classification
         x = x[:, 0]
-        
         # Output layer
         output = self.output(x)
         return output
