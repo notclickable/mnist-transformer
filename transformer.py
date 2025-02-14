@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import wandb
 from datasets import train_loader, test_loader
 from params import * 
 from device import get_device
@@ -8,6 +8,8 @@ from device import get_device
 device = get_device()
 
 torch.manual_seed(42)
+wandb.init(project='mlx6-image-transformer', name='full-transformer')
+wandb.config.update({"learning_rate": learning_rate, "batch_size": batch_size, "num_epochs": num_epochs, "patch_size": patch_size, "embedding_dim": embedding_dim, "output_dim": output_dim, "nhead": nhead, "num_encoder_layers": num_encoder_layers, "num_decoder_layers": num_decoder_layers})
 
 # Full Encoder-Decoder Architecture:
 # Added a complete decoder stack
@@ -28,52 +30,72 @@ torch.manual_seed(42)
 # Note that for MNIST classification, this is overkill - the encoder-only version would be more efficient. However, this architecture would be useful for more complex tasks like image captioning or semantic segmentation.
 
 class FullTransformer(nn.Module):
-    def __init__(self, image_size=56, patch_size=7, embedding_dim=64, output_dim=10, nhead=8, 
-                 num_encoder_layers=2, num_decoder_layers=2, max_seq_length=17):
+    def __init__(self, image_size=56, patch_size=7, embedding_dim=128, output_dim=10, nhead=8, 
+                 num_encoder_layers=6, num_decoder_layers=6, dropout=0.1):  # Increased complexity
         super(FullTransformer, self).__init__()
         
         # Encoder parts
         self.patch_size = patch_size
-        self.num_patches = (image_size // patch_size) ** 2  # 64 patches for 56x56 image with 7x7 patches
-        self.patch_dim = patch_size * patch_size  # 49 for 7x7 patches
+        self.num_patches = (image_size // patch_size) ** 2
+        self.patch_dim = patch_size * patch_size
         
-        # Patch embedding: from patch_dim to embedding_dim
-        self.patch_embedding = nn.Linear(self.patch_dim, embedding_dim)
+        # Increased embedding dimension and added layer norm
+        self.patch_embedding = nn.Sequential(
+            nn.Linear(self.patch_dim, embedding_dim),
+            nn.LayerNorm(embedding_dim),
+            nn.Dropout(dropout)
+        )
         
-        # Position embeddings for patches + CLS token
+        # Position embeddings with dropout
         self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches + 1, embedding_dim))
+        self.pos_dropout = nn.Dropout(dropout)
+        
+        # CLS token
         self.cls_token = nn.Parameter(torch.randn(1, 1, embedding_dim))
         
-        # Encoder
+        # Encoder with more layers and dropout
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=embedding_dim,
             nhead=nhead,
             dim_feedforward=embedding_dim * 4,
+            dropout=dropout,
             batch_first=True
         )
         self.encoder = nn.TransformerEncoder(
             encoder_layer,
-            num_layers=num_encoder_layers
+            num_layers=num_encoder_layers,
+            norm=nn.LayerNorm(embedding_dim)
         )
         
-        # Decoder
+        # Decoder with more layers and dropout
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=embedding_dim,
             nhead=nhead,
             dim_feedforward=embedding_dim * 4,
+            dropout=dropout,
             batch_first=True
         )
         self.decoder = nn.TransformerDecoder(
             decoder_layer,
-            num_layers=num_decoder_layers
+            num_layers=num_decoder_layers,
+            norm=nn.LayerNorm(embedding_dim)
         )
         
-        # Target embedding and positional encoding
-        self.target_embedding = nn.Embedding(output_dim, embedding_dim)
-        self.target_pos_embedding = nn.Parameter(torch.randn(1, max_seq_length, embedding_dim))
+        # Target embedding with normalization
+        self.target_embedding = nn.Sequential(
+            nn.Embedding(output_dim, embedding_dim),
+            nn.LayerNorm(embedding_dim),
+            nn.Dropout(dropout)
+        )
         
-        # Output projection
-        self.output_projection = nn.Linear(embedding_dim, output_dim)
+        self.target_pos_embedding = nn.Parameter(torch.randn(1, 2, embedding_dim))
+        
+        # Output projection with dropout
+        self.output_projection = nn.Sequential(
+            nn.LayerNorm(embedding_dim),
+            nn.Dropout(dropout),
+            nn.Linear(embedding_dim, output_dim)
+        )
 
     def generate_square_subsequent_mask(self, sz):
         mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
@@ -145,26 +167,38 @@ class FullTransformer(nn.Module):
         # Project to vocabulary size
         return self.output_projection(output)
 
-# Training setup
+# Update training parameters
 model = FullTransformer(
-    image_size=56,
+    image_size=image_size,
     patch_size=patch_size,
     embedding_dim=embedding_dim,
     output_dim=output_dim,
-    nhead=8,
-    num_encoder_layers=2,
-    num_decoder_layers=2
+    nhead=nhead,
+    num_encoder_layers=num_encoder_layers,
+    num_decoder_layers=num_decoder_layers
 ).to(device)
 
-# Modified training loop
+# Define loss criterion
+criterion = nn.CrossEntropyLoss()
+
+# Update optimizer with better parameters
+optimizer = torch.optim.AdamW(model.parameters(), 
+                            lr=1e-4,
+                            weight_decay=0.01)
+
+# Add learning rate scheduler
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
+                                                      T_max=num_epochs,
+                                                      eta_min=1e-6)
+
+# Update training loop
 def train_step(model, images, labels, optimizer, criterion):
     batch_size = labels.shape[0]
     total_loss = 0
     
-    for i in range(4):  # Process each position in the 2x2 grid
-        # Convert to long type for embedding layer
+    for i in range(4):
         start_token = torch.zeros(batch_size, 1, dtype=torch.long).to(labels.device)
-        current_label = labels[:, i:i+1].long()  # Convert to long type
+        current_label = labels[:, i:i+1].long()
         tgt = torch.stack([start_token, current_label], dim=1)
         
         outputs = model(images, tgt)
@@ -174,21 +208,38 @@ def train_step(model, images, labels, optimizer, criterion):
     loss = total_loss / 4
     optimizer.zero_grad()
     loss.backward()
+    
+    # Add gradient clipping
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    
     optimizer.step()
     return loss
 
-# Training loop
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-
+# Training loop with improvements
 for epoch in range(num_epochs):
     model.train()
+    total_loss = 0
     for i, (images, labels) in enumerate(train_loader):
         images, labels = images.to(device), labels.to(device)
         loss = train_step(model, images, labels, optimizer, criterion)
+        total_loss += loss.item()
+        wandb.log({'loss': loss.item()})
         
         if (i+1) % 100 == 0:
-            print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
+            avg_loss = total_loss / (i+1)
+            print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Avg Loss: {avg_loss:.4f}")
+    
+    # Step the scheduler
+    scheduler.step()
+
+print('Saving model...')
+torch.save(model.state_dict(), './weights.pt')
+print('Uploading model...')
+artifact = wandb.Artifact('model-weights', type='model')
+artifact.add_file('./weights.pt')
+wandb.log_artifact(artifact)
+wandb.finish()
+print('Uploading finished!')
 
 # Evaluation
 model.eval()
